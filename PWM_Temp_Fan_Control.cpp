@@ -1,178 +1,208 @@
-#include "LCD_DISCO_F429ZI.h"  // LCD library
-#include "TS_DISCO_F429ZI.h"   // Touchscreen library
-#include "mbed.h"              // Mbed OS library
-#include <math.h>              // For ceil()
+#include "LCD_DISCO_F429ZI.h"   // LCD driver
+#include "TS_DISCO_F429ZI.h"    // Touchscreen driver
+#include "mbed.h"               // Mbed OS
+#include <math.h>               // For ceil()
 
+/* -------------------------------
+   Screen and UI button definitions
+---------------------------------*/
+#define SCREEN_W 240            // LCD width (pixels)
+#define SCREEN_H 320            // LCD height (pixels)
 
-// These define the LCD dimensions and button regions in pixels
-#define SCREEN_W 240           // Total width of the LCD screen
-#define SCREEN_H 320           // Total height of the LCD screen
-#define PLUS_BTN_X_START 0     // Left edge of the plus button
-#define PLUS_BTN_X_END 100     // Right edge of the plus button
-#define PLUS_BTN_Y_START 220   // Top edge of the plus button
-#define PLUS_BTN_Y_END 320     // Bottom edge of the plus button (bottom of screen)
-#define MINUS_BTN_X_START 140  // Left edge of the minus button
-#define MINUS_BTN_X_END 240    // Right edge of the minus button (right of screen)
-#define MINUS_BTN_Y_START 220  // Top edge of the minus button
-#define MINUS_BTN_Y_END 320    // Bottom edge of the minus button
+// Plus button coordinates (bottom-left area)
+#define PLUS_BTN_X_START 0
+#define PLUS_BTN_X_END 100
+#define PLUS_BTN_Y_START 220
+#define PLUS_BTN_Y_END 320
 
-// Hardware setup
-LCD_DISCO_F429ZI display;      // Object to control the LCD screen
-TS_DISCO_F429ZI touchScreen;   // Object to read touchscreen input
-PwmOut fanMotor(PA_6);        // PWM output on pin PD_14 to control fan speed
-AnalogIn tempSensor(PA_0);     // Analog input on pin PA_0 to read LM35 temperature sensor voltage
+// Minus button coordinates (bottom-right area)
+#define MINUS_BTN_X_START 140
+#define MINUS_BTN_X_END 240
+#define MINUS_BTN_Y_START 220
+#define MINUS_BTN_Y_END 320
 
-// Global variables
-float tempCurrent;             // Stores the current temperature in °C, updated from sensor
-float tempLimit;               // Stores the user-set temperature threshold in °C
-int fanLevel = 0;              // Fan PWM pulse width in microseconds (0-256 µs), starts at 0 (off)
-bool plusTouched = false;      // Flag: true when plus button is pressed, triggers feedback
-bool minusTouched = false;     // Flag: true when minus button is pressed, triggers feedback
+/* -------------------------------
+   Hardware configuration
+---------------------------------*/
+LCD_DISCO_F429ZI display;        // LCD object
+TS_DISCO_F429ZI touchScreen;     // Touchscreen object
+PwmOut fanMotor(PA_6);           // Fan motor (PWM output pin)
+AnalogIn tempSensor(PA_0);       // LM35 temperature sensor (ADC input pin)
 
-// Timing objects
-Ticker fanRampTicker;          // Periodic timer to gradually increase fan speed
-Ticker tempMonitorTicker;      // Periodic timer to check temperature and control fan
-Timer touchCooldown;           // Timer to debounce touchscreen input (prevent rapid presses)
+/* -------------------------------
+   Global variables
+---------------------------------*/
+float tempCurrent;               // Current temperature (°C)
+float tempLimit;                 // User-set threshold (°C)
+int fanLevel = 0;                // PWM pulse width (0–256 µs)
+bool plusTouched = false;        // True if "+" button pressed
+bool minusTouched = false;       // True if "–" button pressed
 
-// Draw buttons with feedback
+/* -------------------------------
+   Timers and periodic tasks
+---------------------------------*/
+Ticker fanRampTicker;            // Gradually increases fan speed
+Ticker tempMonitorTicker;        // Monitors temp and controls fan
+Timer touchCooldown;             // Debounces touchscreen inputs
+
+/* -------------------------------
+   UI Rendering
+---------------------------------*/
 void renderButtons() {
-    // If neither button is pressed, draw them in their normal state (black)
-    if (plusTouched == false && minusTouched == false) {
-        // Draw plus button as a cross
-        // Horizontal bar: offset 15 from left, 35 from top, width adjusted to fit within button
-        display.FillRect(PLUS_BTN_X_START + 15, PLUS_BTN_Y_START + 35, PLUS_BTN_X_END - PLUS_BTN_X_START - 30, 25);
-        // Vertical bar: offset 35 from left, 15 from top, height adjusted to fit
-        display.FillRect(PLUS_BTN_X_START + 35, PLUS_BTN_Y_START + 15, 25, PLUS_BTN_Y_END - PLUS_BTN_Y_START - 30);
-        // Draw minus button as a horizontal line
-        // Offset 15 from left, 35 from top, width adjusted to fit
-        display.FillRect(MINUS_BTN_X_START + 15, MINUS_BTN_Y_START + 35, MINUS_BTN_X_END - MINUS_BTN_X_START - 30, 25);
+    // Normal state: draw buttons in black
+    if (!plusTouched && !minusTouched) {
+        // "+" button
+        display.FillRect(PLUS_BTN_X_START + 15, PLUS_BTN_Y_START + 35,
+                         PLUS_BTN_X_END - PLUS_BTN_X_START - 30, 25);
+        display.FillRect(PLUS_BTN_X_START + 35, PLUS_BTN_Y_START + 15,
+                         25, PLUS_BTN_Y_END - PLUS_BTN_Y_START - 30);
+
+        // "–" button
+        display.FillRect(MINUS_BTN_X_START + 15, MINUS_BTN_Y_START + 35,
+                         MINUS_BTN_X_END - MINUS_BTN_X_START - 30, 25);
     }
-    // If plus button was pressed, flash it red
+    // Flash "+" button in red for feedback
     else if (plusTouched) {
-        plusTouched = false; // Reset flag immediately so it only flashes once
-        for (int j = 0; j < 800; j++) { // Loop 800 times to create a blocking flash effect
-            display.SetTextColor(LCD_COLOR_RED); // Set color to red for feedback
-            // Redraw plus button in red
-            display.FillRect(PLUS_BTN_X_START + 15, PLUS_BTN_Y_START + 35, PLUS_BTN_X_END - PLUS_BTN_X_START - 30, 25);
-            display.FillRect(PLUS_BTN_X_START + 35, PLUS_BTN_Y_START + 15, 25, PLUS_BTN_Y_END - PLUS_BTN_Y_START - 30);
-            display.SetTextColor(LCD_COLOR_BLACK); // Switch back to black
-            // Redraw minus button to ensure it stays black
-            display.FillRect(MINUS_BTN_X_START + 15, MINUS_BTN_Y_START + 35, MINUS_BTN_X_END - MINUS_BTN_X_START - 30, 25);
-        } // This blocks execution, making the UI unresponsive briefly (~800ms depending on CPU speed)
+        plusTouched = false;
+        for (int j = 0; j < 800; j++) {
+            display.SetTextColor(LCD_COLOR_RED);
+            display.FillRect(PLUS_BTN_X_START + 15, PLUS_BTN_Y_START + 35,
+                             PLUS_BTN_X_END - PLUS_BTN_X_START - 30, 25);
+            display.FillRect(PLUS_BTN_X_START + 35, PLUS_BTN_Y_START + 15,
+                             25, PLUS_BTN_Y_END - PLUS_BTN_Y_START - 30);
+
+            display.SetTextColor(LCD_COLOR_BLACK);
+            display.FillRect(MINUS_BTN_X_START + 15, MINUS_BTN_Y_START + 35,
+                             MINUS_BTN_X_END - MINUS_BTN_X_START - 30, 25);
+        }
     }
-    // If minus button was pressed, flash it red
+    // Flash "–" button in red for feedback
     else if (minusTouched) {
-        minusTouched = false; // Reset flag immediately
-        for (int j = 0; j < 800; j++) { // Blocking loop for flash effect
-            // Redraw plus button in black to keep it normal
-            display.FillRect(PLUS_BTN_X_START + 15, PLUS_BTN_Y_START + 35, PLUS_BTN_X_END - PLUS_BTN_X_START - 30, 25);
-            display.FillRect(PLUS_BTN_X_START + 35, PLUS_BTN_Y_START + 15, 25, PLUS_BTN_Y_END - PLUS_BTN_Y_START - 30);
-            display.SetTextColor(LCD_COLOR_RED); // Set color to red
-            // Redraw minus button in red
-            display.FillRect(MINUS_BTN_X_START + 15, MINUS_BTN_Y_START + 35, MINUS_BTN_X_END - MINUS_BTN_X_START - 30, 25);
-            display.SetTextColor(LCD_COLOR_BLACK); // Reset to black
-        } // Blocks execution similarly
+        minusTouched = false;
+        for (int j = 0; j < 800; j++) {
+            display.FillRect(PLUS_BTN_X_START + 15, PLUS_BTN_Y_START + 35,
+                             PLUS_BTN_X_END - PLUS_BTN_X_START - 30, 25);
+            display.FillRect(PLUS_BTN_X_START + 35, PLUS_BTN_Y_START + 15,
+                             25, PLUS_BTN_Y_END - PLUS_BTN_Y_START - 30);
+
+            display.SetTextColor(LCD_COLOR_RED);
+            display.FillRect(MINUS_BTN_X_START + 15, MINUS_BTN_Y_START + 35,
+                             MINUS_BTN_X_END - MINUS_BTN_X_START - 30, 25);
+
+            display.SetTextColor(LCD_COLOR_BLACK);
+        }
     }
 }
 
-// Ramp up fan speed
+/* -------------------------------
+   Fan control
+---------------------------------*/
+
+// Gradually ramps up fan speed
 void rampUpFan() {
-    // Gradually increase fan speed until it reaches max (256 µs)
     if (fanLevel < 256) {
-        fanLevel += 2;          // Increment by 2 µs each time (gradual increase)
-        fanMotor.pulsewidth_us(fanLevel); // Set new PWM pulse width
+        fanLevel += 2;
+        fanMotor.pulsewidth_us(fanLevel);
     }
 }
 
-// Activate fan
+// Start fan with gradual ramp
 void startFan() {
-    // Attach ticker to call rampUpFan every 100ms, starting the fan if not already running
-    fanRampTicker.attach(&rampUpFan, 0.1); // 0.1s = 100ms interval
+    fanRampTicker.attach(&rampUpFan, 0.1); // Every 100 ms
 }
 
-// Deactivate fan
+// Stop fan immediately
 void stopFan() {
-    fanLevel = 0;              // Reset fan speed to 0 (off)
-    fanRampTicker.detach();    // Stop the ticker from calling rampUpFan
-    fanMotor.pulsewidth_us(fanLevel); // Set PWM to 0 µs
+    fanLevel = 0;
+    fanRampTicker.detach();
+    fanMotor.pulsewidth_us(fanLevel);
 }
 
-// Convert ADC to temp (same flaw as yours)
+/* -------------------------------
+   Temperature handling
+---------------------------------*/
+
+// Convert sensor voltage to °C
 float getTempFromVoltage(float volts) {
-    // Convert ADC reading (0.0-1.0) to temperature
-    
-    return (volts * 100); // this conveninetly cancels out to volts * 100 bc reference votl of 3 and gain of 3
+    // Simplified conversion: LM35 output is 10 mV/°C
+    return (volts * 100);
 }
 
-// Measure and display temperature
+// Read and display current temperature & threshold
 void checkTemperature() {
-    float volts = tempSensor.read(); // Read ADC value from PA_0 (returns 0.0 to 1.0)
-    tempCurrent = getTempFromVoltage(volts); // Convert to temperature (flawed but matches your code)
+    float volts = tempSensor.read(); // 0.0–1.0 (ADC normalized)
+    tempCurrent = getTempFromVoltage(volts);
 
-    display.SetFont(&Font24);        // Set font size to large (24-point) for readability
-    display.SetTextColor(LCD_COLOR_DARKBLUE); // Set text color for temp display
+    display.SetFont(&Font24);
+    display.SetTextColor(LCD_COLOR_DARKBLUE);
 
-    char tempText[20];               // Buffer to hold formatted temperature string
-    // Format current temperature with one decimal place
-    int tempVal = (int)(tempCurrent * 10); // Scale to integer for decimal precision
+    char tempText[20];
+
+    // Display current temperature
+    int tempVal = (int)(tempCurrent * 10);
     snprintf(tempText, sizeof(tempText), "Temp: %d.%dC", tempVal / 10, tempVal % 10);
-    display.DisplayStringAt(0, 45, (uint8_t *)tempText, CENTER_MODE); // Show centered at y=45
+    display.DisplayStringAt(0, 45, (uint8_t *)tempText, CENTER_MODE);
 
-    // Format threshold temperature
+    // Display set threshold
     tempVal = (int)(tempLimit * 10);
     snprintf(tempText, sizeof(tempText), "Limit: %d.%dC", tempVal / 10, tempVal % 10);
-    display.DisplayStringAt(0, 85, (uint8_t *)tempText, CENTER_MODE); // Show centered at y=85
+    display.DisplayStringAt(0, 85, (uint8_t *)tempText, CENTER_MODE);
 }
 
-// Monitor temp and control fan
+// Enable/disable fan based on temperature
 void monitorFan() {
-    // Check if current temp exceeds threshold
-    if (tempLimit < tempCurrent) {
-        startFan();               // Start fan if temp is too high
+    if (tempCurrent > tempLimit) {
+        startFan();
     } else {
-        stopFan();                // Stop fan if temp is below threshold
+        stopFan();
     }
 }
 
-// Main program
+/* -------------------------------
+   Main program
+---------------------------------*/
 int main() {
-    TS_StateTypeDef touchState;    // Structure to store touchscreen state (X, Y, touch detected)
-    uint16_t touchRawX, touchRawY; // Variables for raw touch coordinates
+    TS_StateTypeDef touchState;
+    uint16_t touchRawX, touchRawY;
 
-    fanMotor.period_us(256);       // Set PWM period to 256 µs (frequency ~3.9 kHz)
-    fanMotor.pulsewidth_us(0);     // Start with fan off (0 µs pulse width)
-    display.SetFont(&Font24);      // Set default font size
-    display.Clear(LCD_COLOR_WHITE); // Clear screen to white at startup
-    display.SetTextColor(LCD_COLOR_DARKBLUE); // Set default text color
+    // Configure PWM for fan
+    fanMotor.period_us(256);       // ~3.9 kHz
+    fanMotor.pulsewidth_us(0);     // Start with fan off
 
-    checkTemperature();            // Get initial temperature reading
-    tempLimit = ceil(tempCurrent) + 1.0f; // Set initial threshold 1°C above current temp, rounded up
+    // LCD setup
+    display.SetFont(&Font24);
+    display.Clear(LCD_COLOR_WHITE);
+    display.SetTextColor(LCD_COLOR_DARKBLUE);
 
-    tempMonitorTicker.attach(&monitorFan, 1.0); // Check temp every 1 second
+    // Initial readings
+    checkTemperature();
+    tempLimit = ceil(tempCurrent) + 1.0f; // Default: 1 °C above current temp
+    tempMonitorTicker.attach(&monitorFan, 1.0); // Check every second
 
-    renderButtons();               // Draw buttons at startup
-    touchCooldown.start();         // Start debounce timer
+    renderButtons();
+    touchCooldown.start();
 
-    while (true) {                 // Infinite loop to run continuously
-        touchScreen.GetState(&touchState); // Update touchscreen state
-        // Check if touch is detected and debounce time (500ms) has passed
+    while (true) {
+        // Read touchscreen input
+        touchScreen.GetState(&touchState);
+
         if (touchState.TouchDetected && touchCooldown.read_ms() > 500) {
-            touchCooldown.reset(); // Reset timer for next debounce
-            touchRawX = touchState.X; // Get raw X coordinate
-            touchRawY = touchState.Y; // Get raw Y coordinate
+            touchCooldown.reset();
+            touchRawX = touchState.X;
+            touchRawY = touchState.Y;
 
-            // Check for plus button press (incorrect coordinates from your original)
-            if (touchRawX < 120 && touchRawY < 160) { // Checks top-left, not matching button region
-                plusTouched = true;    // Flag plus button as pressed
-                tempLimit += 0.5;      // Increase threshold by 0.5°C
-            }
-            // Check for minus button press (incorrect coordinates)
-            else if (touchRawX > 120 && touchRawY < 160) { // Checks top-right, wrong Y range
-                minusTouched = true;   // Flag minus button as pressed
-                tempLimit -= 0.5;      // Decrease threshold by 0.5°C
+            // Detect button presses
+            if (touchRawX < 120 && touchRawY < 160) { // (⚠️ Region should be corrected)
+                plusTouched = true;
+                tempLimit += 0.5;
+            } 
+            else if (touchRawX > 120 && touchRawY < 160) {
+                minusTouched = true;
+                tempLimit -= 0.5;
             }
         }
-        checkTemperature();        // Update temperature display every loop
-        renderButtons();           // Redraw buttons every loop (handles flashing if pressed)
+
+        checkTemperature();
+        renderButtons();
     }
 }
